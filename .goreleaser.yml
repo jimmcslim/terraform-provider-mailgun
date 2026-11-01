@@ -53,3 +53,6 @@ signs:
 # # draft: true
 # changelog:
 #   skip: true
+release:
+  # A version like 0.10.0-wo.1 is published as a GitHub pre-release.
+  prerelease: auto

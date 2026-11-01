@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/hashicorp/terraform-plugin-testing/tfversion"
 	"github.com/mailgun/mailgun-go/v5/mtypes"
 )
 
@@ -176,4 +177,57 @@ resource "mailgun_domain_credential" "foobar" {
 	password = "azertyuyiop123456987"
 	region = "us"
 }`
+}
+
+func TestAccMailgunDomainCredential_WriteOnly(t *testing.T) {
+	uuid, _ := uuid.GenerateUUID()
+	domain := fmt.Sprintf("terraformcredwo.%s.com", uuid)
+	name := "mailgun_domain_credential.foobar"
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: protoV6Providers(),
+		TerraformVersionChecks: []tfversion.TerraformVersionCheck{
+			tfversion.SkipBelow(tfversion.Version1_11_0),
+		},
+		CheckDestroy: testAccCheckMailgunCredentialDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccCheckMailgunCredentialConfigWriteOnly(domain, "supersecretpassword1234", 1),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckMailgunCredentialExists(name),
+					resource.TestCheckNoResourceAttr(name, "password"),
+					resource.TestCheckNoResourceAttr(name, "password_wo"),
+					resource.TestCheckResourceAttr(name, "password_wo_version", "1"),
+				),
+			},
+			{
+				// Bumping the version re-sends the new write-only value.
+				Config: testAccCheckMailgunCredentialConfigWriteOnly(domain, "azertyuyiop123456987", 2),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckMailgunCredentialExists(name),
+					resource.TestCheckNoResourceAttr(name, "password_wo"),
+					resource.TestCheckResourceAttr(name, "password_wo_version", "2"),
+				),
+			},
+		},
+	})
+}
+
+func testAccCheckMailgunCredentialConfigWriteOnly(domain, password string, version int) string {
+	return fmt.Sprintf(`
+resource "mailgun_domain" "foobar" {
+	name        = %q
+	spam_action = "disabled"
+	region      = "us"
+	wildcard    = true
+}
+
+resource "mailgun_domain_credential" "foobar" {
+	domain              = mailgun_domain.foobar.id
+	login               = "test_crendential"
+	password_wo         = %q
+	password_wo_version = %d
+	region              = "us"
+}`, domain, password, version)
 }

@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/resourcevalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -23,6 +24,8 @@ var (
 	_ resource.Resource                = (*credentialResource)(nil)
 	_ resource.ResourceWithImportState = (*credentialResource)(nil)
 	_ resource.ResourceWithConfigure   = (*credentialResource)(nil)
+
+	_ resource.ResourceWithConfigValidators = (*credentialResource)(nil)
 )
 
 // NewCredentialResource is the constructor registered with the framework
@@ -41,6 +44,9 @@ type credentialResourceModel struct {
 	Password types.String `tfsdk:"password"`
 	Domain   types.String `tfsdk:"domain"`
 	Region   types.String `tfsdk:"region"`
+
+	PasswordWO        types.String `tfsdk:"password_wo"`
+	PasswordWOVersion types.Int64  `tfsdk:"password_wo_version"`
 }
 
 func (r *credentialResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -63,8 +69,19 @@ func (r *credentialResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				},
 			},
 			"password": schema.StringAttribute{
-				Required:  true,
-				Sensitive: true,
+				Optional:    true,
+				Sensitive:   true,
+				Description: "Password for SMTP authentication. Stored in state. Exactly one of password or password_wo must be set.",
+			},
+			"password_wo": schema.StringAttribute{
+				Optional:    true,
+				Sensitive:   true,
+				WriteOnly:   true,
+				Description: "Write-only password for SMTP authentication, never stored in state. Sent on create and whenever password_wo_version changes. Requires Terraform 1.11 or later.",
+			},
+			"password_wo_version": schema.Int64Attribute{
+				Optional:    true,
+				Description: "Rotation trigger for password_wo. Change it to send a new password_wo value.",
 			},
 			"domain": schema.StringAttribute{
 				Required: true,
@@ -81,6 +98,19 @@ func (r *credentialResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				},
 			},
 		},
+	}
+}
+
+func (r *credentialResource) ConfigValidators(_ context.Context) []resource.ConfigValidator {
+	return []resource.ConfigValidator{
+		resourcevalidator.ExactlyOneOf(
+			path.MatchRoot("password"),
+			path.MatchRoot("password_wo"),
+		),
+		resourcevalidator.Conflicting(
+			path.MatchRoot("password"),
+			path.MatchRoot("password_wo_version"),
+		),
 	}
 }
 
@@ -125,12 +155,23 @@ func (r *credentialResource) Create(ctx context.Context, req resource.CreateRequ
 	email := fmt.Sprintf("%s@%s", plan.Login.ValueString(), domain)
 	log.Printf("[DEBUG] Credential create configuration: email: %s", email)
 
-	if err := client.CreateCredential(ctx, domain, email, plan.Password.ValueString()); err != nil {
+	password := plan.Password.ValueString()
+	if plan.Password.IsNull() {
+		var wo types.String
+		resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("password_wo"), &wo)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		password = wo.ValueString()
+	}
+
+	if err := client.CreateCredential(ctx, domain, email, password); err != nil {
 		resp.Diagnostics.AddError("Failed to create credential", err.Error())
 		return
 	}
 
 	plan.ID = types.StringValue(email)
+	plan.PasswordWO = types.StringNull()
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -177,10 +218,28 @@ func (r *credentialResource) Read(ctx context.Context, req resource.ReadRequest,
 }
 
 func (r *credentialResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan credentialResourceModel
+	var plan, state credentialResourceModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
+	}
+
+	// A write-only password is sent only when its version changes; a
+	// plain password whenever it differs from state.
+	var password string
+	send := false
+	if plan.Password.IsNull() {
+		if !plan.PasswordWOVersion.Equal(state.PasswordWOVersion) {
+			var wo types.String
+			resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("password_wo"), &wo)...)
+			if resp.Diagnostics.HasError() {
+				return
+			}
+			password, send = wo.ValueString(), true
+		}
+	} else if !plan.Password.Equal(state.Password) {
+		password, send = plan.Password.ValueString(), true
 	}
 
 	client, err := r.cfg.GetClient(plan.Region.ValueString())
@@ -193,12 +252,15 @@ func (r *credentialResource) Update(ctx context.Context, req resource.UpdateRequ
 	email := fmt.Sprintf("%s@%s", plan.Login.ValueString(), domain)
 	log.Printf("[DEBUG] Credential update configuration: email: %s", email)
 
-	if err := client.ChangeCredentialPassword(ctx, domain, email, plan.Password.ValueString()); err != nil {
-		resp.Diagnostics.AddError("Failed to update credential", err.Error())
-		return
+	if send {
+		if err := client.ChangeCredentialPassword(ctx, domain, email, password); err != nil {
+			resp.Diagnostics.AddError("Failed to update credential", err.Error())
+			return
+		}
 	}
 
 	plan.ID = types.StringValue(email)
+	plan.PasswordWO = types.StringNull()
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 

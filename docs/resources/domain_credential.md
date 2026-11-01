@@ -20,13 +20,33 @@ resource "mailgun_domain_credential" "foobar" {
 }
 ```
 
+## Write-only password
+
+With Terraform 1.11 or later, `password_wo` keeps the password out of state. Pair it with an ephemeral value:
+
+```hcl
+ephemeral "random_password" "smtp" {
+  length  = 32
+  special = false
+}
+
+resource "mailgun_domain_credential" "app" {
+  domain              = "example.com"
+  login               = "app"
+  password_wo         = ephemeral.random_password.smtp.result
+  password_wo_version = 1
+}
+```
+
 ## Argument Reference
 
 The following arguments are supported:
 
 * `domain` - (Required) The domain to add credential of Mailgun.
 * `login` - (Required) The local-part of the email address to create.
-* `password` - (Required, Sensitive) Password for user authentication. Marked sensitive; not returned by the Mailgun API on read.
+* `password` - (Optional, Sensitive) Password for user authentication. Marked sensitive; not returned by the Mailgun API on read, but stored in state. Exactly one of `password` or `password_wo` must be set.
+* `password_wo` - (Optional, Sensitive, Write-only) Password for user authentication, never stored in state. Sent on create and whenever `password_wo_version` changes. Requires Terraform 1.11 or later.
+* `password_wo_version` - (Optional) Rotation trigger for `password_wo`. A write-only value is absent from state, so Terraform cannot see it change: bump this number to send a new `password_wo`.
 * `region` - (Optional) The region where domain credential will be created. Default value is `us`.
 
 ## Attributes Reference
